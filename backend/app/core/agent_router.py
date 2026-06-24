@@ -111,12 +111,17 @@ async def route_and_generate(
             intent = "text"  # Fallback to text mode
     
     # 6. Default: text mode
+    from app.core.generator import _count_graph_nodes, _count_graph_edges
     messages = build_rag_messages(
         query=query,
         context_chunks=context_chunks,
         confidence=retrieval.confidence,
         confidence_label=retrieval.confidence_label,
         conversation_history=conversation_history,
+        graph_context=retrieval.graph_context,
+        chunk_count=len(retrieval.results),
+        graph_entity_count=_count_graph_nodes(retrieval.graph_context),
+        graph_edge_count=_count_graph_edges(retrieval.graph_context),
     )
     
     if stream:

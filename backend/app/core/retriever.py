@@ -1,4 +1,4 @@
-﻿"""Hybrid retriever: combines vector search with reranking and parent-chunk context."""
+﻿"""Hybrid retriever: combines vector search with reranking, parent-chunk context, and graph retrieval."""
 import logging
 from dataclasses import dataclass, field
 
@@ -27,6 +27,7 @@ class RetrievalResult:
     doc_id: str | None = None
     parent_content: str | None = None
     metadata: dict = field(default_factory=dict)
+    graph_context: str | None = None  # Knowledge graph context for this result
 
 
 @dataclass
@@ -35,6 +36,7 @@ class RetrievalResponse:
     results: list[RetrievalResult]
     confidence: float
     confidence_label: str
+    graph_context: str | None = None  # Aggregated graph context for the query
 
 
 async def retrieve(
@@ -66,12 +68,18 @@ async def retrieve(
     sparse_query = query_embedding.get("sparse")
 
     # 2. Hybrid search in Milvus
-    search_results = vector_store.hybrid_search(
-        kb_id=kb_id,
-        dense_query=dense_query,
-        sparse_query=sparse_query,
-        top_k=top_k,
-    )
+    logger.info(f"Searching KB {kb_id} with query embedding dim={dense_query.shape if hasattr(dense_query, 'shape') else '?'}")
+    try:
+        search_results = vector_store.hybrid_search(
+            kb_id=kb_id,
+            dense_query=dense_query,
+            sparse_query=sparse_query,
+            top_k=top_k,
+        )
+        logger.info(f"Retrieved {len(search_results)} results from vector search")
+    except Exception as e:
+        logger.warning(f"Vector search failed (may need to re-chunk docs): {e}")
+        search_results = []
 
     if not search_results:
         return RetrievalResponse(results=[], confidence=0.0, confidence_label="very_low")
@@ -142,9 +150,132 @@ async def retrieve(
             metadata={"source": doc_name},
         ))
 
-    # 5. Confidence
+    # 5. Graph retrieval: embed query → search graph vector collection → match entities → get neighbors
+    graph_context = None
+    try:
+        graph_context = await _retrieve_graph_context(query, kb_id, dense_query)
+    except Exception:
+        pass  # Graph retrieval is optional, never block the main flow
+
+    # 6. Confidence
     confidence = compute_confidence(rerank_scores, settings.CONFIDENCE_THRESHOLD)
     from app.core.confidence import confidence_label
     label = confidence_label(confidence)
 
-    return RetrievalResponse(results=results, confidence=confidence, confidence_label=label)
+    return RetrievalResponse(
+        results=results,
+        confidence=confidence,
+        confidence_label=label,
+        graph_context=graph_context,
+    )
+
+
+async def _retrieve_graph_context(query: str, kb_id: str, query_dense_vector) -> str | None:
+    """Search the graph vector collection for matching entities, then get neighbors.
+
+    Steps:
+    1. Search kb_{kb_id}_graph vector collection with query embedding
+    2. Get the top matching graph entity
+    3. Get its 1-hop neighbors and relations from Neo4j
+    4. Build a natural language graph context string
+    """
+    from app.core.graph_store import graph_store as gs
+    from app.core.graph_to_vector import _graph_collection_name
+
+    if not gs.ready:
+        return None
+
+    collection_name = _graph_collection_name(kb_id)
+    if not vector_store._use_memory:
+        try:
+            if not vector_store.client.has_collection(collection_name):
+                logger.debug(f"Graph collection {collection_name} does not exist yet")
+                return None
+        except Exception:
+            return None
+    else:
+        # In-memory: check if collection exists
+        if collection_name not in getattr(vector_store.client, 'collections', {}):
+            return None
+
+    # Search graph vector collection
+    try:
+        graph_results = vector_store.hybrid_search(
+            kb_id=f"{kb_id}_graph",
+            dense_query=query_dense_vector,
+            sparse_query=None,
+            top_k=3,
+        )
+    except Exception as e:
+        logger.debug(f"Graph vector search skipped: {e}")
+        return None
+
+    if not graph_results:
+        return None
+
+    # Get the best matching entity — look for node results first, then edge results
+    best_entity_id = None
+    for gr in graph_results:
+        chunk_id = getattr(gr, 'chunk_id', '') or ''
+        if 'graph_node_' in chunk_id:
+            best_entity_id = chunk_id.replace('graph_node_', '')
+            break
+    if not best_entity_id:
+        # Try edge results
+        for gr in graph_results:
+            chunk_id = getattr(gr, 'chunk_id', '') or ''
+            if 'graph_edge_' in chunk_id:
+                edge_key = chunk_id.replace('graph_edge_', '').replace('_', '|')
+                parts = edge_key.split('|')
+                if len(parts) >= 2:
+                    best_entity_id = parts[0]  # source entity
+                    break
+
+    if not best_entity_id:
+        return None
+
+    # Get entity details and neighbors from Neo4j
+    entity = gs.get_entity(best_entity_id)
+    if not entity:
+        return None
+
+    subgraph = gs.get_neighbors(best_entity_id, hops=1)
+
+    # Build natural language context
+    parts = []
+
+    entity_name = entity.get("name", "")
+    entity_type = entity.get("entity_type", "")
+
+    # Describe the matched entity
+    parts.append(f"知识图谱匹配实体: {entity_name}（{entity_type}）")
+
+    # Describe neighbors and relations
+    if subgraph.edges:
+        # Build name lookup
+        node_names = {n.get("id"): n.get("name", n.get("id", "")) for n in subgraph.nodes}
+        relation_lines = []
+        for e in subgraph.edges:
+            src = e.get("source", "")
+            tgt = e.get("target", "")
+            rel = e.get("relation", "")
+            src_name = node_names.get(src, src)
+            tgt_name = node_names.get(tgt, tgt)
+            if src == best_entity_id:
+                relation_lines.append(f"  - {entity_name} {rel} {tgt_name}")
+            elif tgt == best_entity_id:
+                relation_lines.append(f"  - {src_name} {rel} {entity_name}")
+        if relation_lines:
+            parts.append("关联实体与关系：")
+            parts.extend(relation_lines[:15])
+
+    # Add neighbor entity details
+    neighbor_names = []
+    for n in subgraph.nodes:
+        nid = n.get("id", "")
+        if nid != best_entity_id:
+            neighbor_names.append(n.get("name", nid))
+    if neighbor_names:
+        parts.append(f"相邻实体: {', '.join(neighbor_names[:20])}")
+
+    return "\n".join(parts)

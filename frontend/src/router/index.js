@@ -55,6 +55,11 @@ const routes = [
     name: 'KnowledgeGraph',
     component: () => import('@/views/KnowledgeGraph.vue'),
   },
+  {
+    path: '/vector-status',
+    name: 'VectorStatus',
+    component: () => import('@/views/VectorStatus.vue'),
+  },
 ]
 
 const router = createRouter({

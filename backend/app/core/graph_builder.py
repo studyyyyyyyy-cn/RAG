@@ -93,11 +93,29 @@ async def build_graph_for_document(
     # 4. Link chunks to entities (:MENTIONS)
     _link_chunks_to_entities(kb_id, chunks, entities)
 
+    # 5. Embed graph nodes/edges into vector store
+    graph_vector_result = {"nodes_embedded": 0, "edges_embedded": 0}
+    try:
+        from app.core.graph_to_vector import embed_graph_to_vector
+        # Get all nodes for this KB from Neo4j (including newly created ones)
+        all_nodes = graph_store.get_all_entities(kb_id)
+        # Get all edges for this KB
+        sub = graph_store.get_full_graph(kb_id, limit=5000)
+        graph_vector_result = await embed_graph_to_vector(
+            kb_id=kb_id,
+            nodes=all_nodes if all_nodes else sub.nodes,
+            edges=sub.edges if sub.edges else [],
+            embedding_model=None,  # use default
+        )
+    except Exception as e:
+        logger.warning(f"Graph-to-vector embedding skipped: {e}")
+
     return {
         "status": "done",
         "entities": len(graph_entities),
         "relations": len(graph_relations),
         "chunks_processed": len(texts),
+        "vectors_embedded": graph_vector_result,
     }
 
 
@@ -137,11 +155,27 @@ async def build_graph_for_kb(
         total_entities += doc_result.get("entities", 0)
         total_relations += doc_result.get("relations", 0)
 
+    # Final pass: embed ALL graph entities/edges into vector store (force to catch missed ones)
+    vector_result = {"nodes_embedded": 0, "edges_embedded": 0}
+    try:
+        from app.core.graph_to_vector import embed_graph_to_vector
+        all_nodes = graph_store.get_all_entities(kb_id)
+        sub = graph_store.get_full_graph(kb_id, limit=5000)
+        vector_result = await embed_graph_to_vector(
+            kb_id=kb_id,
+            nodes=all_nodes if all_nodes else sub.nodes,
+            edges=sub.edges if sub.edges else [],
+            embedding_model=None,
+        )
+    except Exception as e:
+        logger.warning(f"Graph vector embedding failed: {e}")
+
     return {
         "status": "done",
         "documents_processed": len(docs),
         "total_entities": total_entities,
         "total_relations": total_relations,
+        "vectors_embedded": vector_result,
         "details": results,
     }
 

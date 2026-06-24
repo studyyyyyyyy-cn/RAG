@@ -41,6 +41,10 @@
             <el-icon><Share /></el-icon>
             <span>知识图谱</span>
           </el-menu-item>
+          <el-menu-item index="/vector-status">
+            <el-icon><DataLine /></el-icon>
+            <span>向量状态</span>
+          </el-menu-item>
           <el-menu-item index="/api-test">
             <el-icon><DocumentChecked /></el-icon>
             <span>API 测试</span>

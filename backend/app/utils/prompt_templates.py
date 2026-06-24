@@ -5,14 +5,23 @@ SYSTEM_PROMPT_RAG = """你是一个严谨的知识库问答助手。请严格遵
 
 1. **仅基于【参考资料】中的内容回答问题**，不得编造、推测或补充参考资料中没有的信息
 2. 每个关键论述必须标注来源，格式：[来源: 文档名-页码]
-3. 如果参考资料不足以完整回答问题，明确说明："根据现有知识库资料，暂无法完整回答此问题"，并给出已找到的部分信息
+3. 如果参考资料不足以完整回答问题，明确说明原因并建议补充相关资料
 4. 对不确定的推论使用"根据资料推测"等措辞
 5. 回答使用结构化格式（标题、列表、表格等），提高可读性
-6. 如果问题涉及数据统计、对比分析，尽量用表格或列表呈现"""
+6. 如果问题涉及数据统计、对比分析，尽量用表格或列表呈现
+7. 在回答开头必须先输出匹配统计，格式参考【匹配统计】中的数值"""
 
 
-CONTEXT_TEMPLATE = """【参考资料】:
+CONTEXT_TEMPLATE = """【匹配统计】
+- 文档chunk: {chunk_count}条
+- 图谱节点: {graph_entity_count}个
+- 图谱关系: {graph_edge_count}条
+
+【参考资料】:
 {context}
+
+【知识图谱上下文】:
+{graph_context}
 
 【置信度】: {confidence} ({confidence_label})
 
@@ -38,17 +47,12 @@ def build_rag_messages(
     confidence: float,
     confidence_label: str,
     conversation_history: list[dict] | None = None,
+    graph_context: str | None = None,
+    chunk_count: int = 0,
+    graph_entity_count: int = 0,
+    graph_edge_count: int = 0,
 ) -> list[dict]:
-    """Build the full message list for RAG generation.
-
-    Args:
-        query: User's question
-        context_chunks: List of retrieved chunks with metadata
-        confidence: Confidence score 0-1
-        confidence_label: high/medium/low/very_low
-        conversation_history: Previous messages for multi-turn context
-    """
-    # Format context from chunks
+    """Build the full message list for RAG generation."""
     context_parts = []
     for i, chunk in enumerate(context_chunks, 1):
         source = chunk.get("source", "未知文档")
@@ -56,7 +60,6 @@ def build_rag_messages(
         section = chunk.get("section_title", "")
         text = chunk.get("content", "")
 
-        # Use parent content if available (larger context window)
         parent_text = chunk.get("parent_content")
         if parent_text:
             text = parent_text
@@ -73,14 +76,16 @@ def build_rag_messages(
 
     messages = [{"role": "system", "content": SYSTEM_PROMPT_RAG}]
 
-    # Add conversation history for multi-turn
     if conversation_history:
-        for msg in conversation_history[-6:]:  # Last 3 turns
+        for msg in conversation_history[-6:]:
             messages.append(msg)
 
-    # Add current query with context
     user_content = CONTEXT_TEMPLATE.format(
         context=context,
+        graph_context=graph_context or "（暂无知识图谱数据）",
+        chunk_count=chunk_count,
+        graph_entity_count=graph_entity_count,
+        graph_edge_count=graph_edge_count,
         confidence=f"{confidence:.0%}",
         confidence_label=confidence_label,
         query=query,

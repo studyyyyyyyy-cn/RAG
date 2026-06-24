@@ -15,6 +15,10 @@ from app.config import settings
 from app.core.chunker import ChunkMethod, get_chunker
 from app.core.document_parser import document_parser
 from app.core.embedder import get_embedder
+from app.core.exceptions import (
+    ChunkError, EmptyDocumentError, DimensionMismatchError,
+    VectorInsertError, VectorSearchError, GraphBuildError,
+)
 from app.core.llm_manager import chat_completion, get_llm_config
 from app.core.vector_store import vector_store
 from app.models.chunk import Chunk
@@ -90,7 +94,7 @@ async def _refresh_doc_count(kb_id: str, db: AsyncSession):
 async def _parse_document(doc: Document):
     pages = document_parser.parse(doc.file_path)
     if not pages:
-        raise ValueError("No content extracted from document")
+        raise EmptyDocumentError(doc.filename)
 
 
 async def _process_document(
@@ -111,7 +115,7 @@ async def _process_document(
 
     pages = document_parser.parse(doc.file_path)
     if not pages:
-        raise ValueError("No content extracted from document")
+        raise EmptyDocumentError(doc.filename)
 
     chunker = get_chunker(
         method=chunk_method,
@@ -128,7 +132,7 @@ async def _process_document(
         parent_chunks = []
 
     if not child_chunks:
-        raise ValueError("No chunks generated from document")
+        raise ChunkError("未生成任何分块，请检查文档内容或换一种分块策略")
 
     doc.chunk_progress = 45
     await db.flush()
@@ -207,12 +211,11 @@ async def _process_document(
             sparse_vectors=sparse_vectors if sparse_vectors else None,
             contents=contents,
         )
-    except Exception as e:
+    except VectorInsertError as e:
         error_msg = str(e)
-        if "DataNotMatch" in error_msg or "inconsistent" in error_msg.lower():
-            logger.warning(f"Schema mismatch, force-recreating collection and retrying... ({error_msg})")
-            # Force recreate with correct schema and retry once
-            vector_store.create_collection(str(kb.id), dense_dim=embedder.dim, force=True)  # force to fix schema
+        if "DataNotMatch" in error_msg or "inconsistent" in error_msg.lower() or "dim" in error_msg.lower():
+            logger.warning(f"Schema/dimension mismatch, auto-repairing: {error_msg}")
+            vector_store.create_collection(str(kb.id), dense_dim=embedder.dim, force=True)
             vector_store.insert(
                 kb_id=str(kb.id),
                 chunk_ids=chunk_ids,

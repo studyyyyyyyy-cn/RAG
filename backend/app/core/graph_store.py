@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from app.config import settings
+from app.core.exceptions import Neo4jNotConnectedError, EntityNotFoundError
 
 logger = logging.getLogger(__name__)
 

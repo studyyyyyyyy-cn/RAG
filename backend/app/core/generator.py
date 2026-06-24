@@ -13,6 +13,21 @@ from app.models.llm_config import LLMConfig
 logger = logging.getLogger(__name__)
 
 
+def _count_graph_nodes(graph_context: str | None) -> int:
+    """Roughly count entities from graph context text."""
+    if not graph_context:
+        return 0
+    # Count lines with " - " pattern (entity relations)
+    return graph_context.count("关联实体与关系")
+
+
+def _count_graph_edges(graph_context: str | None) -> int:
+    """Roughly count edges from graph context text."""
+    if not graph_context:
+        return 0
+    return graph_context.count("  - ")
+
+
 async def generate_answer(
     query: str,
     kb_id: str,
@@ -87,6 +102,10 @@ async def generate_answer(
         confidence=retrieval.confidence,
         confidence_label=retrieval.confidence_label,
         conversation_history=conversation_history,
+        graph_context=retrieval.graph_context,
+        chunk_count=len(retrieval.results),
+        graph_entity_count=_count_graph_nodes(retrieval.graph_context),
+        graph_edge_count=_count_graph_edges(retrieval.graph_context),
     )
 
     # 5. Generate answer
@@ -102,6 +121,7 @@ async def generate_answer(
             },
             "confidence": round(retrieval.confidence, 3),
             "confidence_label": retrieval.confidence_label,
+            "graph_context": retrieval.graph_context,
             "metadata": {
                 "model_used": llm_config.model_name,
                 "retrieval_count": len(retrieval.results),

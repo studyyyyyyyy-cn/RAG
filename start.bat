@@ -11,6 +11,15 @@ echo   RAG-Pro v2.0 - Starting...
 echo   Graph + Hybrid Search + Multi-Agent
 echo.
 
+:: --- Kill old processes & clean locks ---
+echo [0/3] Cleaning up old processes...
+taskkill /f /im python.exe /fi "WINDOWTITLE eq Backend*" >nul 2>nul
+taskkill /f /im python.exe /fi "WINDOWTITLE eq RAG*" >nul 2>nul
+:: Clean Milvus lock file
+if exist "backend\data\milvus.db\LOCK" del /f "backend\data\milvus.db\LOCK" >nul 2>nul
+echo   Done
+echo.
+
 :: --- Check environment ---
 if not exist "backend" (
     echo [ERR] backend folder not found

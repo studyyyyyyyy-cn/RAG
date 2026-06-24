@@ -5,6 +5,8 @@ Falls back to in-memory FAISS-like search on Windows where Milvus Lite is unavai
 """
 import logging
 import os
+import shutil
+import time
 import uuid
 import json
 from dataclasses import dataclass
@@ -13,6 +15,10 @@ from pathlib import Path
 import numpy as np
 
 from app.config import settings
+from app.core.exceptions import (
+    MilvusNotAvailableError, DimensionMismatchError,
+    CollectionNotFoundError, VectorInsertError, VectorSearchError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -304,10 +310,10 @@ class VectorStore:
         try:
             from pymilvus import MilvusClient
             self.client = MilvusClient(uri=settings.MILVUS_URI)
-            logger.info(f"Milvus client initialized with uri: {settings.MILVUS_URI}")
+            logger.info(f"Milvus initialized: {settings.MILVUS_URI}")
             return True
         except Exception as e:
-            logger.warning(f"Milvus not available ({e}), using in-memory vector store")
+            logger.warning(f"Milvus not available ({e}), falling back to in-memory store")
             self._use_memory = True
             self.client = InMemoryVectorStore(settings.MILVUS_URI)
             return True
@@ -356,14 +362,34 @@ class VectorStore:
 
         # Also drop if force=True
         if force and self.client.has_collection(collection_name):
-            self.client.drop_collection(collection_name)
-            logger.info(f"Force-dropped collection {collection_name}")
+            # Milvus Lite's drop_collection has a Windows bug (manifest rename fails).
+            # Workaround: delete the directory directly on disk, then retry drop.
+            collection_dir = Path(settings.MILVUS_URI).parent / "milvus.db" / "collections" / collection_name
+            # Try proper drop first
+            try:
+                self.client.drop_collection(collection_name)
+            except Exception:
+                pass
+            time.sleep(0.3)
+            # Force-delete the directory if it still exists
+            if collection_dir.exists():
+                for attempt in range(10):
+                    try:
+                        shutil.rmtree(str(collection_dir), ignore_errors=True)
+                        time.sleep(0.3)
+                        if not collection_dir.exists():
+                            logger.info(f"Force-deleted collection dir: {collection_name}")
+                            break
+                    except Exception:
+                        time.sleep(0.5)
+                        if attempt == 9:
+                            logger.warning(f"Could not delete {collection_dir}")
 
         from pymilvus import DataType
         schema = self.client.create_schema(auto_id=False, enable_dynamic_field=True)
-        schema.add_field(field_name="id", datatype=DataType.VARCHAR, max_length=64, is_primary=True)
-        schema.add_field(field_name="chunk_id", datatype=DataType.VARCHAR, max_length=64)
-        schema.add_field(field_name="doc_id", datatype=DataType.VARCHAR, max_length=64)
+        schema.add_field(field_name="id", datatype=DataType.VARCHAR, max_length=128, is_primary=True)
+        schema.add_field(field_name="chunk_id", datatype=DataType.VARCHAR, max_length=128)
+        schema.add_field(field_name="doc_id", datatype=DataType.VARCHAR, max_length=128)
         schema.add_field(field_name="dense_vector", datatype=DataType.FLOAT_VECTOR, dim=dense_dim)
         schema.add_field(field_name="sparse_vector", datatype=DataType.VARCHAR, max_length=65535)
         schema.add_field(field_name="content", datatype=DataType.VARCHAR, max_length=8192)
@@ -371,8 +397,21 @@ class VectorStore:
         index_params = self.client.prepare_index_params()
         index_params.add_index(field_name="dense_vector", index_type="FLAT", metric_type="COSINE")
 
-        self.client.create_collection(collection_name=collection_name, schema=schema, index_params=index_params)
-        logger.info(f"Created collection {collection_name} with dim={dense_dim}")
+        # Retry on Windows file-lock errors
+        last_err = None
+        for attempt in range(3):
+            try:
+                self.client.create_collection(collection_name=collection_name, schema=schema, index_params=index_params)
+                logger.info(f"Created collection {collection_name} with dim={dense_dim}")
+                return
+            except Exception as e:
+                last_err = e
+                if "183" in str(e) or "exist" in str(e).lower():
+                    logger.warning(f"File lock on create (attempt {attempt+1}/3), retrying...")
+                    time.sleep(1)
+                else:
+                    raise
+        raise last_err
 
     def _get_collection_dim(self, collection_name: str) -> int | None:
         """Read the dense_vector dimension from an existing Milvus collection."""
@@ -425,8 +464,16 @@ class VectorStore:
         if self._use_memory:
             self.client.insert(collection_name, data)
         else:
-            self.client.insert(collection_name=collection_name, data=data)
-            logger.info(f"Inserted {len(data)} vectors into {collection_name}")
+            try:
+                self.client.insert(collection_name=collection_name, data=data)
+                # Ensure collection is loaded for search after insert
+                try:
+                    self.client.load_collection(collection_name)
+                except Exception:
+                    pass
+                logger.info(f"Inserted {len(data)} vectors into {collection_name}")
+            except Exception as e:
+                raise VectorInsertError(str(e)) from e
 
     def hybrid_search(
         self,
@@ -450,28 +497,74 @@ class VectorStore:
             return [SearchResult(chunk_id=r["chunk_id"], score=r["score"], content=r["content"]) for r in results]
 
         if not self.client.has_collection(collection_name):
+            logger.warning(f"Collection {collection_name} does not exist for search")
             return []
 
-        # For Milvus, use dense search only (Milvus Lite doesn't support sparse vectors well)
-        results = self.client.search(
-            collection_name=collection_name,
-            data=[dense_query.tolist() if hasattr(dense_query, 'tolist') else dense_query],
-            anns_field="dense_vector",
-            search_params={"metric_type": "COSINE"},
-            limit=top_k,
-            output_fields=["chunk_id", "content", "doc_id"],
-        )
+        # Milvus Lite has a bug: search() always fails with function_score error.
+        # Workaround: dump all vectors from Milvus and do cosine search in numpy.
+        try:
+            # Load collection and get all vectors
+            self.client.load_collection(collection_name)
+            all_data = self.client.query(
+                collection_name=collection_name,
+                filter="",
+                output_fields=["chunk_id", "content", "doc_id", "dense_vector"],
+                limit=100000,
+            )
 
+            if not all_data:
+                logger.warning(f"Collection {collection_name} is empty")
+                return []
+
+            logger.info(f"Loaded {len(all_data)} vectors from {collection_name}, doing local search...")
+
+            # Extract vectors and compute cosine similarity
+            import numpy as np
+            vectors = np.array([d.get("dense_vector", []) for d in all_data])
+            query_vec = np.array(dense_query.tolist() if hasattr(dense_query, 'tolist') else dense_query)
+
+            # Normalize
+            vectors_norm = vectors / (np.linalg.norm(vectors, axis=1, keepdims=True) + 1e-10)
+            query_norm = query_vec / (np.linalg.norm(query_vec) + 1e-10)
+            scores = np.dot(vectors_norm, query_norm)
+
+            # Top-k
+            top_indices = np.argsort(scores)[::-1][:top_k]
+
+            search_results = []
+            for idx in top_indices:
+                if scores[idx] > 0:
+                    d = all_data[idx]
+                    search_results.append(SearchResult(
+                        chunk_id=d.get("chunk_id", ""),
+                        score=float(scores[idx]),
+                        content=d.get("content", ""),
+                    ))
+            return search_results
+        except Exception as e:
+            logger.error(f"Search failed: {e}")
+            return []
+
+        # Old code path (in-memory) still returns from above.
+        # The local numpy search results are already SearchResult objects.
+        # This code only runs if we ever restore pymilvus Collection.search().
         search_results = []
         for hits in results:
             for hit in hits:
-                entity = hit.get("entity", {})
-                search_results.append(SearchResult(
-                    chunk_id=entity.get("chunk_id", ""),
-                    score=hit.get("distance", 0.0),
-                    content=entity.get("content", ""),
-                ))
-
+                if isinstance(hit, dict):
+                    entity = hit.get("entity", {})
+                    search_results.append(SearchResult(
+                        chunk_id=entity.get("chunk_id", ""),
+                        score=hit.get("distance", 0.0),
+                        content=entity.get("content", ""),
+                    ))
+                else:
+                    entity = getattr(hit, 'entity', {}) or {}
+                    search_results.append(SearchResult(
+                        chunk_id=entity.get("chunk_id", ""),
+                        score=getattr(hit, 'distance', 0.0),
+                        content=entity.get("content", ""),
+                    ))
         return search_results
 
     def delete_by_doc(self, kb_id: str, doc_id: str):
