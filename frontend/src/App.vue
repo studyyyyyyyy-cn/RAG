@@ -1,61 +1,74 @@
 <template>
-  <el-config-provider :locale="zhCn" :dialog="{ lockScroll: false }">
-    <el-container class="app-shell">
-      <el-header class="app-topbar">
-        <div class="logo">
-          <div class="logo-mark">
-            <el-icon :size="22"><DataAnalysis /></el-icon>
+  <el-config-provider :locale="zhCn">
+    <div class="app-root">
+      <!-- Sidebar -->
+      <aside class="sidebar">
+        <div class="sidebar-brand">
+          <div class="brand-icon">
+            <el-icon :size="24"><Cpu /></el-icon>
           </div>
-          <div>
-            <div class="logo-title">RAG知识库管理及问答系统</div>
-            <div class="logo-subtitle">RAG Knowledge OS</div>
+          <div class="brand-text">
+            <div class="brand-title">RAG Pro</div>
+            <div class="brand-sub">Knowledge OS</div>
           </div>
         </div>
 
-        <el-menu :default-active="activeMenu" router class="sidebar-menu">
+        <el-menu :default-active="activeMenu" router class="nav-menu">
           <el-menu-item index="/dashboard">
-            <el-icon><DataLine /></el-icon>
+            <el-icon><Odometer /></el-icon>
             <span>数据看板</span>
           </el-menu-item>
           <el-menu-item index="/knowledge">
-            <el-icon><Collection /></el-icon>
-            <span>知识库管理</span>
+            <el-icon><FolderOpened /></el-icon>
+            <span>知识库</span>
           </el-menu-item>
           <el-menu-item index="/chat">
-            <el-icon><ChatDotRound /></el-icon>
+            <el-icon><ChatLineSquare /></el-icon>
             <span>智能问答</span>
-          </el-menu-item>
-          <el-menu-item index="/shortcuts">
-            <el-icon><Star /></el-icon>
-            <span>快捷方式</span>
-          </el-menu-item>
-          <el-menu-item index="/settings">
-            <el-icon><Setting /></el-icon>
-            <span>系统设置</span>
-          </el-menu-item>
-          <el-menu-item index="/mcp-test">
-            <el-icon><Connection /></el-icon>
-            <span>MCP 测试</span>
           </el-menu-item>
           <el-menu-item index="/knowledge-graph">
             <el-icon><Share /></el-icon>
             <span>知识图谱</span>
           </el-menu-item>
           <el-menu-item index="/vector-status">
-            <el-icon><DataLine /></el-icon>
+            <el-icon><Monitor /></el-icon>
             <span>向量状态</span>
           </el-menu-item>
+          <el-menu-item index="/shortcuts">
+            <el-icon><Star /></el-icon>
+            <span>快捷方式</span>
+          </el-menu-item>
+
+          <div class="nav-divider"></div>
+
+          <el-menu-item index="/settings">
+            <el-icon><Setting /></el-icon>
+            <span>系统设置</span>
+          </el-menu-item>
+          <el-menu-item index="/mcp-test">
+            <el-icon><Connection /></el-icon>
+            <span>MCP</span>
+          </el-menu-item>
           <el-menu-item index="/api-test">
-            <el-icon><DocumentChecked /></el-icon>
-            <span>API 测试</span>
+            <el-icon><Document /></el-icon>
+            <span>API</span>
           </el-menu-item>
         </el-menu>
-      </el-header>
 
-      <el-main class="app-main">
-        <router-view />
-      </el-main>
-    </el-container>
+        <div class="sidebar-footer">
+          <el-tag size="small" type="info" effect="plain">v2.1</el-tag>
+        </div>
+      </aside>
+
+      <!-- Main -->
+      <main class="main-area">
+        <router-view v-slot="{ Component }">
+          <transition name="fade" mode="out-in">
+            <component :is="Component" />
+          </transition>
+        </router-view>
+      </main>
+    </div>
   </el-config-provider>
 </template>
 
@@ -69,118 +82,114 @@ const activeMenu = computed(() => route.path)
 </script>
 
 <style>
-* {
-  margin: 0;
-  padding: 0;
-  box-sizing: border-box;
-}
+/* ── Global Reset ── */
+*, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
 
 html, body, #app {
   height: 100%;
-  font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  font-family: "Inter", "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  background: #f0f2f5;
+  color: #1a1a2e;
 }
 
-.app-shell {
-  height: 100vh;
-  padding: 16px;
-  gap: 16px;
-  background: transparent;
-  flex-direction: column;
-}
+/* ── Scrollbar ── */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-thumb { background: #c0c4cc; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #909399; }
 
-.app-topbar {
+/* ── Transition ── */
+.fade-enter-active, .fade-leave-active { transition: opacity 0.2s ease; }
+.fade-enter-from, .fade-leave-to { opacity: 0; }
+</style>
+
+<style scoped>
+.app-root {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 18px;
-  height: auto;
-  padding: 14px 18px;
-  border-radius: 30px;
-  background:
-    radial-gradient(circle at top left, rgba(255, 107, 107, 0.14), transparent 24%),
-    linear-gradient(180deg, #1f2742 0%, #26294e 48%, #1f3551 100%);
-  color: #fff;
-  box-shadow: 0 24px 60px rgba(30, 42, 81, 0.28);
+  height: 100vh;
+  overflow: hidden;
 }
 
-.logo {
+/* ── Sidebar ── */
+.sidebar {
+  width: 230px;
+  min-width: 230px;
+  background: linear-gradient(180deg, #1a1a2e 0%, #16213e 100%);
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+  overflow: hidden;
+}
+
+.sidebar-brand {
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 10px 12px 18px;
+  padding: 24px 20px 20px;
 }
 
-.logo-mark {
-  width: 48px;
-  height: 48px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: 18px;
-  background: linear-gradient(135deg, #ff7a59, #48dbfb 60%, #1dd1a1);
+.brand-icon {
+  width: 44px; height: 44px;
+  display: flex; align-items: center; justify-content: center;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  border-radius: 14px;
   color: #fff;
-  box-shadow: 0 14px 30px rgba(79, 124, 255, 0.24);
+  box-shadow: 0 8px 20px rgba(102, 126, 234, 0.35);
 }
 
-.logo-title {
-  font-size: 20px;
-  font-weight: 800;
+.brand-title {
+  font-size: 18px; font-weight: 700; color: #fff; letter-spacing: -0.3px;
 }
 
-.logo-subtitle {
-  margin-top: 3px;
-  color: rgba(234, 238, 255, 0.62);
-  font-size: 12px;
+.brand-sub {
+  font-size: 11px; color: rgba(255,255,255,0.45); margin-top: 2px;
 }
 
-.sidebar-menu {
+/* ── Nav Menu ── */
+.nav-menu {
+  flex: 1;
   border-right: 0 !important;
   background: transparent !important;
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-
-.sidebar-menu .el-menu-item {
-  height: 46px;
-  margin-bottom: 0;
-  border-radius: 18px;
-  color: rgba(223, 229, 255, 0.78);
-}
-
-.sidebar-menu .el-menu-item:hover {
-  background: rgba(255, 255, 255, 0.08) !important;
-}
-
-.sidebar-menu .el-menu-item.is-active {
-  color: #fff !important;
-  background: linear-gradient(135deg, rgba(79, 124, 255, 0.36), rgba(72, 219, 251, 0.22)) !important;
-  box-shadow: inset 0 0 0 1px rgba(140, 191, 255, 0.18);
-}
-
-.app-main {
-  border-radius: 34px;
+  padding: 8px 12px;
   overflow-y: auto;
-  background: transparent;
-  padding: 0 !important;
-  min-height: 0;
-  flex: 1;
 }
 
-@media (max-width: 1100px) {
-  .app-shell {
-    padding: 10px;
-    gap: 10px;
-  }
+.nav-menu .el-menu-item {
+  height: 42px; line-height: 42px;
+  margin-bottom: 2px;
+  border-radius: 10px;
+  color: rgba(255, 255, 255, 0.65);
+  font-size: 14px;
+  transition: all 0.2s;
+}
 
-  .app-topbar {
-    flex-direction: column;
-    align-items: stretch;
-  }
+.nav-menu .el-menu-item:hover {
+  background: rgba(255, 255, 255, 0.06) !important;
+  color: #fff !important;
+}
 
-  .sidebar-menu {
-    justify-content: flex-start;
-  }
+.nav-menu .el-menu-item.is-active {
+  color: #fff !important;
+  background: rgba(102, 126, 234, 0.25) !important;
+  font-weight: 600;
+}
+
+.nav-divider {
+  height: 1px;
+  background: rgba(255,255,255,0.08);
+  margin: 12px 8px;
+}
+
+/* ── Sidebar Footer ── */
+.sidebar-footer {
+  padding: 16px 20px;
+  border-top: 1px solid rgba(255,255,255,0.06);
+}
+
+/* ── Main ── */
+.main-area {
+  flex: 1;
+  overflow-y: auto;
+  padding: 24px;
+  background: #f0f2f5;
 }
 </style>
