@@ -31,6 +31,9 @@ markdown==3.7
 # Graph Database
 neo4j>=5.26.0
 
+# ANN Search
+hnswlib>=0.8.0
+
 # Utilities
 aiofiles==24.1.0
 python-dotenv==1.0.1

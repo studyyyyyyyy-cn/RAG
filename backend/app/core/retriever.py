@@ -150,12 +150,12 @@ async def retrieve(
             metadata={"source": doc_name},
         ))
 
-    # 5. Graph retrieval: embed query → search graph vector collection → match entities → get neighbors
+    # 5. Graph context: find best-matching entity from fused results, get Neo4j neighborhood
     graph_context = None
     try:
         graph_context = await _retrieve_graph_context(query, kb_id, dense_query)
     except Exception:
-        pass  # Graph retrieval is optional, never block the main flow
+        pass  # Graph context is optional
 
     # 6. Confidence
     confidence = compute_confidence(rerank_scores, settings.CONFIDENCE_THRESHOLD)
@@ -170,112 +170,104 @@ async def retrieve(
     )
 
 
-async def _retrieve_graph_context(query: str, kb_id: str, query_dense_vector) -> str | None:
-    """Search the graph vector collection for matching entities, then get neighbors.
+async def _retrieve_graph_context(
+    query: str, kb_id: str, query_dense_vector
+) -> str | None:
+    """Search graph vector collection independently → find best matching entity → Neo4j neighborhood.
 
-    Steps:
-    1. Search kb_{kb_id}_graph vector collection with query embedding
-    2. Get the top matching graph entity
-    3. Get its 1-hop neighbors and relations from Neo4j
-    4. Build a natural language graph context string
+    Document chunks and graph entities are searched separately.
+    Both are independently fed to the LLM as context.
     """
     from app.core.graph_store import graph_store as gs
-    from app.core.graph_to_vector import _graph_collection_name
 
     if not gs.ready:
         return None
 
-    collection_name = _graph_collection_name(kb_id)
-    if not vector_store._use_memory:
-        try:
-            if not vector_store.client.has_collection(collection_name):
-                logger.debug(f"Graph collection {collection_name} does not exist yet")
-                return None
-        except Exception:
-            return None
-    else:
-        # In-memory: check if collection exists
-        if collection_name not in getattr(vector_store.client, 'collections', {}):
-            return None
-
     # Search graph vector collection
     try:
-        graph_results = vector_store.hybrid_search(
-            kb_id=f"{kb_id}_graph",
-            dense_query=query_dense_vector,
-            sparse_query=None,
-            top_k=3,
-        )
-    except Exception as e:
-        logger.debug(f"Graph vector search skipped: {e}")
+        graph_results = vector_store.search_graph(kb_id, query_dense_vector, top_k=5)
+    except Exception:
         return None
 
     if not graph_results:
         return None
 
-    # Get the best matching entity — look for node results first, then edge results
+    # Find best matching entity from graph search results
     best_entity_id = None
     for gr in graph_results:
-        chunk_id = getattr(gr, 'chunk_id', '') or ''
-        if 'graph_node_' in chunk_id:
-            best_entity_id = chunk_id.replace('graph_node_', '')
+        cid = getattr(gr, 'chunk_id', '') or ''
+        if cid.startswith('graph_node_'):
+            best_entity_id = cid.replace('graph_node_', '')
             break
-    if not best_entity_id:
-        # Try edge results
-        for gr in graph_results:
-            chunk_id = getattr(gr, 'chunk_id', '') or ''
-            if 'graph_edge_' in chunk_id:
-                edge_key = chunk_id.replace('graph_edge_', '').replace('_', '|')
-                parts = edge_key.split('|')
-                if len(parts) >= 2:
-                    best_entity_id = parts[0]  # source entity
-                    break
+        elif cid.startswith('graph_edge_'):
+            edge_key = cid.replace('graph_edge_', '').replace('_', '|')
+            parts = edge_key.split('|')
+            if len(parts) >= 1:
+                best_entity_id = parts[0]
+                break
 
     if not best_entity_id:
         return None
 
-    # Get entity details and neighbors from Neo4j
+    # Get entity + neighborhood from Neo4j
     entity = gs.get_entity(best_entity_id)
     if not entity:
         return None
 
     subgraph = gs.get_neighbors(best_entity_id, hops=1)
 
-    # Build natural language context
+    # Build natural language context with entity details + neighbors + relations
     parts = []
 
     entity_name = entity.get("name", "")
     entity_type = entity.get("entity_type", "")
 
-    # Describe the matched entity
-    parts.append(f"知识图谱匹配实体: {entity_name}（{entity_type}）")
+    # Entity type labels
+    type_labels = {"PERSON":"人物","ORGANIZATION":"组织","PRODUCT":"产品","CONCEPT":"概念",
+                   "LOCATION":"地点","TIME":"时间","EVENT":"事件","ATTRIBUTE":"属性"}
 
-    # Describe neighbors and relations
+    # Describe the matched entity with properties
+    entity_label = type_labels.get(entity_type, entity_type)
+    props = entity.get("properties", {}) or {}
+    skip = {"kb_id", "id", "name", "entity_type", "aliases"}
+    prop_desc = "，".join(f"{k}: {v}" for k, v in props.items() if k not in skip and v)
+    if prop_desc:
+        parts.append(f"核心实体: {entity_name}（{entity_label}，{prop_desc}）")
+    else:
+        parts.append(f"核心实体: {entity_name}（{entity_label}）")
+
+    # Build name lookup for neighbors
+    node_map = {n.get("id"): n for n in subgraph.nodes}
+
+    # Describe relations with neighbor context
     if subgraph.edges:
-        # Build name lookup
-        node_names = {n.get("id"): n.get("name", n.get("id", "")) for n in subgraph.nodes}
-        relation_lines = []
+        parts.append("关联关系：")
+        seen = set()
         for e in subgraph.edges:
-            src = e.get("source", "")
-            tgt = e.get("target", "")
-            rel = e.get("relation", "")
-            src_name = node_names.get(src, src)
-            tgt_name = node_names.get(tgt, tgt)
+            src, tgt, rel = e.get("source",""), e.get("target",""), e.get("relation","")
             if src == best_entity_id:
-                relation_lines.append(f"  - {entity_name} {rel} {tgt_name}")
+                neighbor = node_map.get(tgt, {})
+                n_name = neighbor.get("name", tgt)
+                n_type = type_labels.get(neighbor.get("entity_type",""), neighbor.get("entity_type",""))
+                n_props = neighbor.get("properties", {}) or {}
+                n_desc = "，".join(f"{k}:{v}" for k,v in n_props.items() if k not in skip and v)
+                desc = f"  {entity_name} {rel} {n_name}"
+                if n_type: desc += f"（{n_type}）"
+                if n_desc: desc += f" [{n_desc}]"
+                if desc not in seen:
+                    seen.add(desc)
+                    parts.append(desc)
             elif tgt == best_entity_id:
-                relation_lines.append(f"  - {src_name} {rel} {entity_name}")
-        if relation_lines:
-            parts.append("关联实体与关系：")
-            parts.extend(relation_lines[:15])
-
-    # Add neighbor entity details
-    neighbor_names = []
-    for n in subgraph.nodes:
-        nid = n.get("id", "")
-        if nid != best_entity_id:
-            neighbor_names.append(n.get("name", nid))
-    if neighbor_names:
-        parts.append(f"相邻实体: {', '.join(neighbor_names[:20])}")
+                neighbor = node_map.get(src, {})
+                n_name = neighbor.get("name", src)
+                n_type = type_labels.get(neighbor.get("entity_type",""), neighbor.get("entity_type",""))
+                n_props = neighbor.get("properties", {}) or {}
+                n_desc = "，".join(f"{k}:{v}" for k,v in n_props.items() if k not in skip and v)
+                desc = f"  {n_name} {rel} {entity_name}"
+                if n_type: desc += f"（{n_type}）"
+                if n_desc: desc += f" [{n_desc}]"
+                if desc not in seen:
+                    seen.add(desc)
+                    parts.append(desc)
 
     return "\n".join(parts)

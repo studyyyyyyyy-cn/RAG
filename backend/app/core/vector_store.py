@@ -395,7 +395,8 @@ class VectorStore:
         schema.add_field(field_name="content", datatype=DataType.VARCHAR, max_length=8192)
 
         index_params = self.client.prepare_index_params()
-        index_params.add_index(field_name="dense_vector", index_type="FLAT", metric_type="COSINE")
+        index_params.add_index(field_name="dense_vector", index_type="HNSW", metric_type="COSINE",
+                               params={"M": 16, "efConstruction": 200})
 
         # Retry on Windows file-lock errors
         last_err = None
@@ -482,7 +483,11 @@ class VectorStore:
         sparse_query: dict | None = None,
         top_k: int = 20,
     ) -> list[SearchResult]:
-        """Perform hybrid search (dense + sparse with RRF fusion)."""
+        """HNSW dense + BM25 sparse → RRF fusion on document chunks only.
+
+        Graph entities are searched separately for context enrichment.
+        """
+        import numpy as np
         self._init_client()
         if self.client is None:
             logger.warning("Vector store not available")
@@ -491,81 +496,122 @@ class VectorStore:
         collection_name = self._collection_name(kb_id)
 
         if self._use_memory:
-            # Use in-memory hybrid search with RRF
             dense_vec = dense_query.tolist() if hasattr(dense_query, 'tolist') else dense_query
             results = self.client.hybrid_search(collection_name, dense_vec, sparse_query, top_k)
             return [SearchResult(chunk_id=r["chunk_id"], score=r["score"], content=r["content"]) for r in results]
 
         if not self.client.has_collection(collection_name):
-            logger.warning(f"Collection {collection_name} does not exist for search")
+            logger.warning(f"Collection {collection_name} does not exist")
             return []
 
-        # Milvus Lite has a bug: search() always fails with function_score error.
-        # Workaround: dump all vectors from Milvus and do cosine search in numpy.
         try:
-            # Load collection and get all vectors
             self.client.load_collection(collection_name)
             all_data = self.client.query(
-                collection_name=collection_name,
-                filter="",
-                output_fields=["chunk_id", "content", "doc_id", "dense_vector"],
+                collection_name=collection_name, filter="",
+                output_fields=["chunk_id", "content", "doc_id", "dense_vector", "sparse_vector"],
                 limit=100000,
             )
-
-            if not all_data:
-                logger.warning(f"Collection {collection_name} is empty")
-                return []
-
-            logger.info(f"Loaded {len(all_data)} vectors from {collection_name}, doing local search...")
-
-            # Extract vectors and compute cosine similarity
-            import numpy as np
-            vectors = np.array([d.get("dense_vector", []) for d in all_data])
-            query_vec = np.array(dense_query.tolist() if hasattr(dense_query, 'tolist') else dense_query)
-
-            # Normalize
-            vectors_norm = vectors / (np.linalg.norm(vectors, axis=1, keepdims=True) + 1e-10)
-            query_norm = query_vec / (np.linalg.norm(query_vec) + 1e-10)
-            scores = np.dot(vectors_norm, query_norm)
-
-            # Top-k
-            top_indices = np.argsort(scores)[::-1][:top_k]
-
-            search_results = []
-            for idx in top_indices:
-                if scores[idx] > 0:
-                    d = all_data[idx]
-                    search_results.append(SearchResult(
-                        chunk_id=d.get("chunk_id", ""),
-                        score=float(scores[idx]),
-                        content=d.get("content", ""),
-                    ))
-            return search_results
         except Exception as e:
-            logger.error(f"Search failed: {e}")
+            logger.error(f"Cannot load {collection_name}: {e}")
             return []
 
-        # Old code path (in-memory) still returns from above.
-        # The local numpy search results are already SearchResult objects.
-        # This code only runs if we ever restore pymilvus Collection.search().
-        search_results = []
-        for hits in results:
-            for hit in hits:
-                if isinstance(hit, dict):
-                    entity = hit.get("entity", {})
-                    search_results.append(SearchResult(
-                        chunk_id=entity.get("chunk_id", ""),
-                        score=hit.get("distance", 0.0),
-                        content=entity.get("content", ""),
-                    ))
-                else:
-                    entity = getattr(hit, 'entity', {}) or {}
-                    search_results.append(SearchResult(
-                        chunk_id=entity.get("chunk_id", ""),
-                        score=getattr(hit, 'distance', 0.0),
-                        content=entity.get("content", ""),
-                    ))
-        return search_results
+        if not all_data:
+            return []
+
+        query_vec = np.array(dense_query.tolist() if hasattr(dense_query, 'tolist') else dense_query, dtype=np.float32)
+        query_vec = query_vec / (np.linalg.norm(query_vec) + 1e-10)
+        rrf_k = 60
+        rrf_scores = {}
+
+        # ── 1. HNSW dense search ──
+        doc_dense = _run_hnsw_search(f"{collection_name}_{len(all_data)}", all_data, query_vec, top_k * 3)
+        for rank, (idx, _) in enumerate(doc_dense, 1):
+            rrf_scores[idx] = rrf_scores.get(idx, 0) + 1.0 / (rrf_k + rank)
+
+        # ── 2. BM25 sparse search ──
+        if sparse_query:
+            sparse_ranked = []
+            for i, d in enumerate(all_data):
+                sv_str = d.get("sparse_vector", "")
+                if not sv_str:
+                    continue
+                try:
+                    doc_sparse = json.loads(sv_str) if isinstance(sv_str, str) else sv_str
+                except (json.JSONDecodeError, TypeError):
+                    continue
+                score = sum(qw * float(doc_sparse.get(str(tid), 0)) for tid, qw in sparse_query.items() if isinstance(doc_sparse, dict))
+                if score > 0:
+                    sparse_ranked.append((i, score))
+            for rank, (idx, _) in enumerate(sorted(sparse_ranked, key=lambda x: x[1], reverse=True), 1):
+                rrf_scores[idx] = rrf_scores.get(idx, 0) + 1.0 / (rrf_k + rank)
+
+        # ── 3. RRF fusion ──
+        fused = sorted(rrf_scores.items(), key=lambda x: x[1], reverse=True)[:top_k]
+
+        results = []
+        for idx, rrf_score in fused:
+            if idx < len(all_data):
+                d = all_data[idx]
+                results.append(SearchResult(
+                    chunk_id=d.get("chunk_id", ""),
+                    score=rrf_score,
+                    content=d.get("content", ""),
+                ))
+
+        logger.info(f"HNSW+BM25+RRF: {len(doc_dense)} dense + {len(sparse_ranked) if sparse_query else 0} sparse → {len(results)} fused")
+        return results
+
+    def search_graph(
+        self,
+        kb_id: str,
+        dense_query,
+        top_k: int = 5,
+    ) -> list[SearchResult]:
+        """Search the graph vector collection for matching entities/edges."""
+        import numpy as np
+        self._init_client()
+        if self.client is None:
+            return []
+
+        collection_name = self._collection_name(kb_id) + "_graph"
+
+        if self._use_memory:
+            if collection_name in getattr(self.client, 'collections', {}):
+                dense_vec = dense_query.tolist() if hasattr(dense_query, 'tolist') else dense_query
+                return [SearchResult(chunk_id=r["chunk_id"], score=r["score"], content=r["content"])
+                        for r in self.client.hybrid_search(collection_name, dense_vec, None, top_k)]
+            return []
+
+        if not self.client.has_collection(collection_name):
+            return []
+
+        try:
+            self.client.load_collection(collection_name)
+            all_data = self.client.query(
+                collection_name=collection_name, filter="",
+                output_fields=["chunk_id", "content", "dense_vector"],
+                limit=100000,
+            )
+        except Exception as e:
+            logger.debug(f"Cannot load graph collection: {e}")
+            return []
+
+        if not all_data:
+            return []
+
+        query_vec = np.array(dense_query.tolist() if hasattr(dense_query, 'tolist') else dense_query, dtype=np.float32)
+        query_vec = query_vec / (np.linalg.norm(query_vec) + 1e-10)
+        ranked = _run_hnsw_search(f"{collection_name}_{len(all_data)}", all_data, query_vec, top_k)
+
+        results = []
+        for idx, score in ranked:
+            d = all_data[idx]
+            results.append(SearchResult(
+                chunk_id=d.get("chunk_id", ""),
+                score=score,
+                content=d.get("content", ""),
+            ))
+        return results
 
     def delete_by_doc(self, kb_id: str, doc_id: str):
         """Delete all vectors belonging to a document."""
@@ -594,6 +640,59 @@ class VectorStore:
         elif self.client.has_collection(collection_name):
             self.client.drop_collection(collection_name)
             logger.info(f"Dropped collection {collection_name}")
+
+
+# ── HNSW Index cache ────────────────────────────────────────────────────
+
+_hnsw_cache: dict[str, object] = {}
+
+
+def _run_hnsw_search(cache_key: str, all_data: list[dict], query_vec, top_k: int) -> list[tuple[int, float]]:
+    """Run HNSW/Numpy cosine search and return ranked (index, score) pairs."""
+    import numpy as np
+    hnsw = _get_or_build_hnsw(cache_key, all_data)
+    if hnsw is not None:
+        labels, distances = hnsw.knn_query(query_vec.reshape(1, -1), k=min(top_k, len(all_data)))
+        return [(int(labels[0][i]), float(1.0 - distances[0][i])) for i in range(len(labels[0]))]
+    else:
+        vectors = np.array([d.get("dense_vector", []) for d in all_data], dtype=np.float32)
+        vectors_norm = vectors / (np.linalg.norm(vectors, axis=1, keepdims=True) + 1e-10)
+        scores = np.dot(vectors_norm, query_vec)
+        top_indices = np.argsort(scores)[::-1][:top_k]
+        return [(int(i), float(scores[i])) for i in top_indices if scores[i] > 0]
+
+
+def _get_or_build_hnsw(cache_key: str, all_data: list[dict]) -> object | None:
+    """Get or build an HNSW index for a collection snapshot.
+
+    Uses hnswlib if available, falls back to numpy brute-force.
+    """
+    if cache_key in _hnsw_cache:
+        return _hnsw_cache[cache_key]
+
+    import numpy as np
+    vectors = np.array([d.get("dense_vector", []) for d in all_data], dtype=np.float32)
+    if len(vectors) == 0:
+        return None
+
+    # Normalize for cosine similarity
+    norms = np.linalg.norm(vectors, axis=1, keepdims=True) + 1e-10
+    vectors = vectors / norms
+
+    try:
+        import hnswlib
+        dim = vectors.shape[1]
+        index = hnswlib.Index(space='cosine', dim=dim)
+        index.init_index(max_elements=max(len(vectors), 100), ef_construction=200, M=16)
+        index.add_items(vectors, np.arange(len(vectors)))
+        index.set_ef(min(100, len(vectors)))
+        _hnsw_cache[cache_key] = index
+        logger.info(f"HNSW index built: {len(vectors)} vectors, dim={dim}")
+        return index
+    except ImportError:
+        logger.debug("hnswlib not installed, using numpy brute-force ANN")
+        _hnsw_cache[cache_key] = None
+        return None
 
 
 # Singleton
