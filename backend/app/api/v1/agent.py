@@ -16,6 +16,7 @@ from app.agents.chart_agent import chart_agent
 from app.agents.report_agent import report_agent
 from app.agents.webpage_agent import webpage_agent
 from app.agents.data_agent import data_agent
+from app.agents.graph_agent import graph_agent
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -25,6 +26,7 @@ AGENT_MAP = {
     "report": report_agent,
     "webpage": webpage_agent,
     "data_table": data_agent,
+    "knowledge_graph": graph_agent,
 }
 
 
@@ -167,4 +169,11 @@ async def generate_report(req: AgentRequest, db: AsyncSession = Depends(get_db))
 async def analyze_data(req: AgentRequest, db: AsyncSession = Depends(get_db)):
     """Shortcut to run data analysis."""
     req.agent_type = "data_table"
+    return await execute_agent(req, db)
+
+
+@router.post("/agent/graph")
+async def generate_graph(req: AgentRequest, db: AsyncSession = Depends(get_db)):
+    """Shortcut to generate a knowledge graph."""
+    req.agent_type = "knowledge_graph"
     return await execute_agent(req, db)

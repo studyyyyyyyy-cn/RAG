@@ -50,6 +50,11 @@ const routes = [
     name: 'ApiTest',
     component: () => import('@/views/ApiTest.vue'),
   },
+  {
+    path: '/knowledge-graph',
+    name: 'KnowledgeGraph',
+    component: () => import('@/views/KnowledgeGraph.vue'),
+  },
 ]
 
 const router = createRouter({

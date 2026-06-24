@@ -78,6 +78,11 @@
           </div>
         </div>
 
+        <!-- Knowledge Graph -->
+        <div v-if="message.type === 'knowledge_graph'" class="knowledge-graph-frame">
+          <ChartRenderer v-if="message.content?.graph_spec" :option="message.content.graph_spec" style="height:450px" />
+        </div>
+
         <div v-if="message.content?.citations?.length" class="citations">
           <SourceCitation :citations="message.content.citations" />
         </div>

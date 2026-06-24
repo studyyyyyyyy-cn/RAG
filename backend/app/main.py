@@ -8,7 +8,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app.config import settings
 from app.models.database import init_db
-from app.api.v1 import knowledge, document, chat, agent, shortcut, llm_provider
+from app.api.v1 import knowledge, document, chat, agent, shortcut, llm_provider, graph_api
 from app.mcp.server import router as mcp_router
 from app.utils.webpage_publisher import ensure_published_pages_dir
 
@@ -40,6 +40,7 @@ app.include_router(chat.router, prefix=settings.API_PREFIX, tags=["Chat"])
 app.include_router(agent.router, prefix=settings.API_PREFIX, tags=["Agents"])
 app.include_router(shortcut.router, prefix=settings.API_PREFIX, tags=["Shortcuts"])
 app.include_router(llm_provider.router, prefix=settings.API_PREFIX, tags=["LLM Providers"])
+app.include_router(graph_api.router, prefix=settings.API_PREFIX, tags=["Knowledge Graph"])
 app.include_router(mcp_router, prefix="/mcp", tags=["MCP"])
 app.mount("/published-pages", StaticFiles(directory=str(ensure_published_pages_dir())), name="published-pages")
 

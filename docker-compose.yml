@@ -19,6 +19,25 @@ services:
       timeout: 5s
       retries: 5
 
+  # Neo4j Graph Database
+  neo4j:
+    image: neo4j:5.24-community
+    container_name: ragapp-neo4j
+    environment:
+      NEO4J_AUTH: neo4j/password
+      NEO4J_PLUGINS: '["apoc"]'
+    ports:
+      - "7474:7474"   # HTTP
+      - "7687:7687"   # Bolt
+    volumes:
+      - neo4j_data:/data
+      - neo4j_logs:/logs
+    healthcheck:
+      test: ["CMD-SHELL", "cypher-shell -u neo4j -p password 'RETURN 1'"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+
   # Redis
   redis:
     image: redis:7-alpine
@@ -98,6 +117,9 @@ services:
       CELERY_RESULT_BACKEND: redis://redis:6379/2
       MILVUS_HOST: milvus
       MILVUS_PORT: 19530
+      NEO4J_URI: bolt://neo4j:7687
+      NEO4J_USER: neo4j
+      NEO4J_PASSWORD: password
       EMBEDDING_DEVICE: cpu
     volumes:
       - ./backend:/app
@@ -150,3 +172,5 @@ volumes:
   minio_data:
   milvus_data:
   upload_data:
+  neo4j_data:
+  neo4j_logs:

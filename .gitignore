@@ -45,7 +45,6 @@ frontend/dist/
 # Generated / temp files
 recursive_chunks.json
 install.bat
-start.bat
 test-chunking-optimization.sh
 test_*.py
 

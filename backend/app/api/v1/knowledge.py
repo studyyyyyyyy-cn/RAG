@@ -16,7 +16,7 @@ router = APIRouter()
 class KBCreate(BaseModel):
     name: str
     description: str | None = None
-    embedding_model: str = "BAAI/bge-m3"
+    embedding_model: str = ""  # empty = use settings.DEFAULT_EMBEDDING_MODEL
     chunk_size: int = 512
     chunk_overlap: int = 64
 
@@ -36,10 +36,12 @@ async def create_knowledge_base(
     db: AsyncSession = Depends(get_db),
 ):
     """Create a new knowledge base."""
+    # Resolve embedding model: form default → settings default
+    model_name = data.embedding_model or settings.DEFAULT_EMBEDDING_MODEL
     kb = KnowledgeBase(
         name=data.name,
         description=data.description,
-        embedding_model=data.embedding_model,
+        embedding_model=model_name,
         chunk_size=data.chunk_size,
         chunk_overlap=data.chunk_overlap,
     )
@@ -48,7 +50,7 @@ async def create_knowledge_base(
 
     # Create Milvus collection with correct embedding dimension
     try:
-        embedder = get_embedder(data.embedding_model, settings.EMBEDDING_DEVICE)
+        embedder = get_embedder(model_name, settings.EMBEDDING_DEVICE)
         dim = embedder.dim
     except Exception:
         dim = vector_store.DENSE_DIM  # fallback to default
@@ -160,3 +162,33 @@ async def delete_knowledge_base(
     vector_store.drop_collection(str(kb_id))
 
     return {"detail": "Knowledge base deleted"}
+
+
+@router.post("/kb/{kb_id}/repair-collection")
+async def repair_collection(
+    kb_id: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """Force-recreate the Milvus collection with correct embedding dimension.
+
+    Use this when you get 'dimension mismatch' errors during chunking.
+    Existing vectors will be lost — re-chunk documents after repair.
+    """
+    kb = await db.get(KnowledgeBase, kb_id)
+    if not kb:
+        raise HTTPException(status_code=404, detail="Knowledge base not found")
+
+    embedder = get_embedder(kb.embedding_model, settings.EMBEDDING_DEVICE)
+    correct_dim = embedder.dim
+    old_dim = vector_store._get_collection_dim(vector_store._collection_name(kb_id))
+
+    vector_store.create_collection(str(kb_id), dense_dim=correct_dim, force=True)
+
+    return {
+        "detail": "Collection repaired",
+        "kb_id": kb_id,
+        "embedding_model": kb.embedding_model,
+        "correct_dim": correct_dim,
+        "old_dim": old_dim,
+        "hint": "请重新对文档执行分块操作",
+    }

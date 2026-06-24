@@ -72,6 +72,13 @@ class Settings(BaseSettings):
     DEFAULT_CHUNK_OVERLAP: int = 64
     PARENT_CHUNK_SIZE: int = 1536
 
+    # Neo4j (Knowledge Graph)
+    NEO4J_URI: str = "bolt://localhost:7687"
+    NEO4J_USER: str = "neo4j"
+    NEO4J_PASSWORD: str = "password"
+    NEO4J_DATABASE: str = "neo4j"
+    GRAPH_ENABLED: bool = True
+
     # Celery
     CELERY_BROKER_URL: str = "redis://localhost:6379/1"
     CELERY_RESULT_BACKEND: str = "redis://localhost:6379/2"

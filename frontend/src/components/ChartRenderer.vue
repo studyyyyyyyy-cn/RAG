@@ -8,7 +8,7 @@
 import { computed } from 'vue'
 import VChart from 'vue-echarts'
 import { use } from 'echarts/core'
-import { BarChart, LineChart, PieChart, ScatterChart, RadarChart, TreeChart } from 'echarts/charts'
+import { BarChart, LineChart, PieChart, ScatterChart, RadarChart, TreeChart, GraphChart } from 'echarts/charts'
 import {
   TitleComponent, TooltipComponent, LegendComponent,
   GridComponent, DatasetComponent, TransformComponent,
@@ -16,7 +16,7 @@ import {
 import { CanvasRenderer } from 'echarts/renderers'
 
 use([
-  BarChart, LineChart, PieChart, ScatterChart, RadarChart, TreeChart,
+  BarChart, LineChart, PieChart, ScatterChart, RadarChart, TreeChart, GraphChart,
   TitleComponent, TooltipComponent, LegendComponent,
   GridComponent, DatasetComponent, TransformComponent,
   CanvasRenderer,

@@ -58,6 +58,7 @@ export const agentApi = {
   chart: (data) => api.post('/agent/chart', data, { timeout: 300000 }),
   report: (data) => api.post('/agent/report', data, { timeout: 300000 }),
   analyze: (data) => api.post('/agent/analyze', data, { timeout: 300000 }),
+  graph: (data) => api.post('/agent/graph', data, { timeout: 300000 }),
 }
 
 export const shortcutApi = {

@@ -105,6 +105,7 @@
                   <el-dropdown-item command="report">生成报表</el-dropdown-item>
                   <el-dropdown-item command="data_table">数据分析</el-dropdown-item>
                   <el-dropdown-item command="webpage">网页展示</el-dropdown-item>
+                  <el-dropdown-item command="knowledge_graph">知识图谱</el-dropdown-item>
                 </el-dropdown-menu>
               </template>
             </el-dropdown>
@@ -144,6 +145,7 @@ const AGENT_NAMES = {
   report: '生成报表',
   data_table: '数据分析',
   webpage: '网页展示',
+  knowledge_graph: '知识图谱',
 }
 
 const LLM_STORAGE_KEY = 'selectedLlmId'

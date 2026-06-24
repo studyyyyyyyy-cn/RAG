@@ -11,6 +11,7 @@ from app.agents.report_agent import report_agent
 from app.agents.chart_agent import chart_agent
 from app.agents.data_agent import data_agent
 from app.agents.webpage_agent import webpage_agent
+from app.agents.graph_agent import graph_agent
 from app.utils.prompt_templates import build_rag_messages
 from app.models.llm_config import LLMConfig
 
@@ -22,6 +23,7 @@ AGENTS = {
     "chart": chart_agent,
     "data_table": data_agent,
     "webpage": webpage_agent,
+    "knowledge_graph": graph_agent,
 }
 
 

@@ -37,7 +37,7 @@ async def detect_intent(query: str, llm_config: LLMConfig) -> str:
     try:
         result = await chat_completion(messages, llm_config, stream=False)
         intent = result.strip().lower()
-        if intent in ("text", "chart", "report", "webpage", "data_table"):
+        if intent in ("text", "chart", "report", "webpage", "data_table", "knowledge_graph"):
             return intent
     except Exception as e:
         logger.warning(f"Intent detection failed: {e}")

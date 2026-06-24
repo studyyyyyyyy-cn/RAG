@@ -16,6 +16,19 @@ from app.config import settings
 
 logger = logging.getLogger(__name__)
 
+
+def _numpy_encoder(obj):
+    """JSON encoder for numpy types."""
+    import numpy as np
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    if isinstance(obj, (np.float32, np.float64, np.float16)):
+        return float(obj)
+    if isinstance(obj, (np.int32, np.int64, np.int16, np.int8)):
+        return int(obj)
+    raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
+
+
 # Ensure data directory exists
 data_dir = Path(settings.MILVUS_URI).parent
 data_dir.mkdir(parents=True, exist_ok=True)
@@ -59,7 +72,7 @@ class InMemoryVectorStore:
             return
         try:
             with open(self.storage_path, 'w', encoding='utf-8') as f:
-                json.dump(self.collections, f, ensure_ascii=False)
+                json.dump(self.collections, f, ensure_ascii=False, default=_numpy_encoder)
             self._dirty = False
         except Exception as e:
             logger.warning(f"Failed to save vectors to disk: {e}")
@@ -80,8 +93,13 @@ class InMemoryVectorStore:
 
         for item in data:
             self.collections[name]["vectors"].append(item["dense_vector"])
-            # Store sparse vector if available
+            # Store sparse vector as dict (deserialize from JSON string if needed)
             sparse_vec = item.get("sparse_vector", {})
+            if isinstance(sparse_vec, str) and sparse_vec:
+                try:
+                    sparse_vec = json.loads(sparse_vec)
+                except (json.JSONDecodeError, TypeError):
+                    sparse_vec = {}
             self.collections[name]["sparse_vectors"].append(sparse_vec)
             self.collections[name]["metadata"].append({
                 "id": item["id"],
@@ -263,7 +281,7 @@ class InMemoryVectorStore:
 class VectorStore:
     """Vector store supporting dense vector search with Milvus or in-memory fallback."""
 
-    DENSE_DIM = 1024  # BGE-M3 default dimension (use 384 for MiniLM)
+    DENSE_DIM = 1024  # BGE-M3 embedding dimension
 
     def __init__(self):
         self.client = None
@@ -298,8 +316,12 @@ class VectorStore:
         """Generate a collection name from knowledge base ID."""
         return f"kb_{kb_id.replace('-', '_')}"
 
-    def create_collection(self, kb_id: str, dense_dim: int | None = None):
-        """Create a collection for a knowledge base."""
+    def create_collection(self, kb_id: str, dense_dim: int | None = None, force: bool = False):
+        """Create or verify a collection for a knowledge base.
+
+        Automatically detects dimension mismatches and recreates the collection.
+        Use force=True to always recreate.
+        """
         if dense_dim is None:
             dense_dim = self.DENSE_DIM
         self._init_client()
@@ -313,9 +335,29 @@ class VectorStore:
             self.client.create_collection(collection_name)
             return
 
-        if self.client.has_collection(collection_name):
-            logger.info(f"Collection {collection_name} already exists")
-            return
+        if self.client.has_collection(collection_name) and not force:
+            existing_dim = self._get_collection_dim(collection_name)
+            if existing_dim is None:
+                # Can't determine dimension — recreate to be safe
+                logger.warning(
+                    f"Cannot read dimension of {collection_name}, "
+                    f"recreating with dim={dense_dim}"
+                )
+                self.client.drop_collection(collection_name)
+            elif existing_dim != dense_dim:
+                logger.warning(
+                    f"Collection {collection_name} dim mismatch: "
+                    f"existing={existing_dim}, required={dense_dim}. Recreating..."
+                )
+                self.client.drop_collection(collection_name)
+            else:
+                logger.info(f"Collection {collection_name} OK (dim={existing_dim})")
+                return
+
+        # Also drop if force=True
+        if force and self.client.has_collection(collection_name):
+            self.client.drop_collection(collection_name)
+            logger.info(f"Force-dropped collection {collection_name}")
 
         from pymilvus import DataType
         schema = self.client.create_schema(auto_id=False, enable_dynamic_field=True)
@@ -323,6 +365,7 @@ class VectorStore:
         schema.add_field(field_name="chunk_id", datatype=DataType.VARCHAR, max_length=64)
         schema.add_field(field_name="doc_id", datatype=DataType.VARCHAR, max_length=64)
         schema.add_field(field_name="dense_vector", datatype=DataType.FLOAT_VECTOR, dim=dense_dim)
+        schema.add_field(field_name="sparse_vector", datatype=DataType.VARCHAR, max_length=65535)
         schema.add_field(field_name="content", datatype=DataType.VARCHAR, max_length=8192)
 
         index_params = self.client.prepare_index_params()
@@ -330,6 +373,25 @@ class VectorStore:
 
         self.client.create_collection(collection_name=collection_name, schema=schema, index_params=index_params)
         logger.info(f"Created collection {collection_name} with dim={dense_dim}")
+
+    def _get_collection_dim(self, collection_name: str) -> int | None:
+        """Read the dense_vector dimension from an existing Milvus collection."""
+        try:
+            info = self.client.describe_collection(collection_name)
+            # Milvus Lite returns fields as a list; Milvus server may differ
+            fields = info.get("fields", [])
+            if not fields and hasattr(info, "schema"):
+                fields = info.schema.get("fields", [])
+            for field in fields:
+                name = field.get("name", "") if isinstance(field, dict) else getattr(field, "name", "")
+                if name == "dense_vector":
+                    if isinstance(field, dict):
+                        return field.get("params", {}).get("dim") or field.get("dim")
+                    else:
+                        return getattr(field, "params", {}).get("dim") or getattr(field, "dim", None)
+        except Exception as e:
+            logger.warning(f"Cannot read collection dim for {collection_name}: {e}")
+        return None
 
     def insert(
         self,
@@ -355,11 +417,9 @@ class VectorStore:
                 "chunk_id": chunk_ids[i],
                 "doc_id": doc_ids[i],
                 "dense_vector": dense_vectors[i].tolist() if hasattr(dense_vectors[i], 'tolist') else dense_vectors[i],
+                "sparse_vector": "" if not sparse_vectors or i >= len(sparse_vectors) else json.dumps(sparse_vectors[i], default=_numpy_encoder),
                 "content": contents[i][:8000],
             }
-            # Add sparse vector if available
-            if sparse_vectors and i < len(sparse_vectors):
-                item["sparse_vector"] = sparse_vectors[i]
             data.append(item)
 
         if self._use_memory:

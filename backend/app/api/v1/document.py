@@ -1,6 +1,7 @@
 ﻿"""Document upload and management API endpoints."""
 import asyncio
 import json
+import logging
 import re
 import time
 from typing import Optional
@@ -24,6 +25,7 @@ from app.utils.file_handler import delete_file, get_file_extension, save_upload_
 from app.utils.prompt_templates import build_rag_messages
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 class ChunkBatchRequest(BaseModel):
@@ -140,6 +142,8 @@ async def _process_document(
     doc.chunk_progress = 60
     await db.flush()
 
+    logger.info(f"Using embedder: {kb.embedding_model}, dim={embedder.dim}, device={settings.EMBEDDING_DEVICE}")
+    logger.info(f"Dense vectors shape: {embeddings['dense'].shape if hasattr(embeddings['dense'], 'shape') else len(embeddings['dense'])}")
     vector_store.create_collection(str(kb.id), dense_dim=embedder.dim)
 
     parent_chunk_map: dict[int, str] = {}
@@ -194,17 +198,50 @@ async def _process_document(
     doc.chunk_progress = 85
     await db.flush()
 
-    vector_store.insert(
-        kb_id=str(kb.id),
-        chunk_ids=chunk_ids,
-        doc_ids=doc_ids,
-        dense_vectors=dense_vectors,
-        sparse_vectors=sparse_vectors if sparse_vectors else None,
-        contents=contents,
-    )
+    try:
+        vector_store.insert(
+            kb_id=str(kb.id),
+            chunk_ids=chunk_ids,
+            doc_ids=doc_ids,
+            dense_vectors=dense_vectors,
+            sparse_vectors=sparse_vectors if sparse_vectors else None,
+            contents=contents,
+        )
+    except Exception as e:
+        error_msg = str(e)
+        if "DataNotMatch" in error_msg or "inconsistent" in error_msg.lower():
+            logger.warning(f"Schema mismatch, force-recreating collection and retrying... ({error_msg})")
+            # Force recreate with correct schema and retry once
+            vector_store.create_collection(str(kb.id), dense_dim=embedder.dim, force=True)  # force to fix schema
+            vector_store.insert(
+                kb_id=str(kb.id),
+                chunk_ids=chunk_ids,
+                doc_ids=doc_ids,
+                dense_vectors=dense_vectors,
+                sparse_vectors=sparse_vectors if sparse_vectors else None,
+                contents=contents,
+            )
+        else:
+            raise
 
     doc.total_chunks = len(child_chunks)
     doc.chunk_progress = 100
+    await db.flush()
+
+    # Build knowledge graph (async, non-blocking)
+    try:
+        from app.core.graph_builder import build_graph_for_document
+        llm_cfg = await get_llm_config(db, None)
+        if llm_cfg:
+            graph_result = await build_graph_for_document(
+                doc_id=str(doc.id),
+                kb_id=str(kb.id),
+                db=db,
+                llm_config=llm_cfg,
+            )
+            logger.info(f"Graph built for doc {doc.id}: {graph_result}")
+    except Exception as e:
+        logger.warning(f"Graph build skipped for doc {doc.id}: {e}")
 
 
 @router.post("/kb/{kb_id}/documents")
@@ -305,6 +342,42 @@ async def chunk_document(
         doc.error_message = str(e)
         await db.commit()
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/kb/{kb_id}/build-graph")
+async def build_knowledge_graph(
+    kb_id: str,
+    doc_ids: list[str] | None = None,
+    db: AsyncSession = Depends(get_db),
+):
+    """Build knowledge graph for existing documents in a knowledge base.
+
+    If doc_ids is provided, only build graph for those documents.
+    Otherwise build graph for all 'done' documents.
+    """
+    from app.core.graph_builder import build_graph_for_kb, build_graph_for_document
+
+    kb = await db.get(KnowledgeBase, kb_id)
+    if not kb:
+        raise HTTPException(status_code=404, detail="Knowledge base not found")
+
+    llm_config = await get_llm_config(db, None)
+    if not llm_config:
+        raise HTTPException(status_code=400, detail="No LLM configured — graph extraction requires LLM")
+
+    if doc_ids:
+        results = []
+        for doc_id in doc_ids:
+            doc = await db.get(Document, doc_id)
+            if not doc or doc.kb_id != kb_id:
+                results.append({"doc_id": doc_id, "status": "skipped", "reason": "not found"})
+                continue
+            result = await build_graph_for_document(doc_id, kb_id, db, llm_config)
+            results.append({"doc_id": doc_id, **result})
+        return {"status": "done", "results": results}
+    else:
+        result = await build_graph_for_kb(kb_id, db, llm_config)
+        return result
 
 
 @router.post("/kb/{kb_id}/documents/chunk-batch")
