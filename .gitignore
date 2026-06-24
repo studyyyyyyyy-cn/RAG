@@ -1,0 +1,53 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+.eggs/
+dist/
+build/
+*.whl
+
+# Virtual Environment
+venv/
+.venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Models (large files)
+backend/models/
+
+# Uploaded files & data
+backend/uploads/*
+!backend/uploads/.gitkeep
+backend/data/*
+!backend/data/.gitkeep
+
+# Environment
+.env
+
+# Node (frontend)
+frontend/node_modules/
+frontend/dist/
+
+# Claude
+.claude/
+
+# Generated / temp files
+recursive_chunks.json
+install.bat
+start.bat
+test-chunking-optimization.sh
+test_*.py
+
+# Milvus lock
+*.lock
